@@ -47,6 +47,18 @@ function clearManifestCache(reason) {
   manifestCache.clear();
 }
 
+function normalizeCustomMediaType(value, fallback) {
+  const label = String(value || fallback || '').trim();
+  const slug = label
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+  return slug || 'custom';
+}
+
 function purgeListConfigs(userConfig, listIdPrefixOrExactId, isExactId = false) {
   const idsToRemove = new Set();
 
@@ -62,13 +74,15 @@ function purgeListConfigs(userConfig, listIdPrefixOrExactId, isExactId = false) 
           }
       }
   }
-  // Also purge customMediaTypeNames
-  if (userConfig.customMediaTypeNames) {
-    for (const key in userConfig.customMediaTypeNames) {
+  // Also purge custom media type slugs and their display labels
+  for (const field of ['customMediaTypeNames', 'customMediaTypeLabels']) {
+    if (userConfig[field]) {
+      for (const key in userConfig[field]) {
         if ((isExactId && key === listIdPrefixOrExactId) || (!isExactId && key.startsWith(listIdPrefixOrExactId) && !key.startsWith('traktpublic_'))) {
-            idsToRemove.add(key);
-            delete userConfig.customMediaTypeNames[key];
+          idsToRemove.add(key);
+          delete userConfig[field][key];
         }
+      }
     }
   }
 
@@ -759,6 +773,7 @@ module.exports = function(router) {
     configToSend.hiddenLists = Array.from(new Set(configToSend.hiddenLists || []));
     configToSend.removedLists = Array.from(new Set(configToSend.removedLists || []));
     configToSend.customMediaTypeNames = configToSend.customMediaTypeNames || {};
+    configToSend.customMediaTypeLabels = configToSend.customMediaTypeLabels || {};
     
     // Add connection status flags (non-sensitive)
     configToSend.isConnected = {
@@ -1121,7 +1136,7 @@ module.exports = function(router) {
 
   router.post('/:configHash/import-list-url', async (req, res) => {
     try {
-        const { url } = req.body;
+        const { url, category } = req.body;
         if (!url) return res.status(400).json({ error: 'List URL required' });
 
         let importedListDetails;
@@ -1181,6 +1196,17 @@ module.exports = function(router) {
             return res.status(400).json({ error: `List "${listNameForDisplay}" from ${sourceSystem} contains no movie or show content.` });
         }
         req.userConfig.importedAddons[addonId] = addonToStore;
+
+        // A public Trakt list can be assigned its own real catalog type. If no
+        // category was supplied, use the Trakt list name as the default.
+        if (addonToStore.isTraktPublicList) {
+          if (!req.userConfig.customMediaTypeNames) req.userConfig.customMediaTypeNames = {};
+          if (!req.userConfig.customMediaTypeLabels) req.userConfig.customMediaTypeLabels = {};
+          const categoryLabel = String(category || listNameForDisplay).trim() || listNameForDisplay;
+          req.userConfig.customMediaTypeNames[addonId] = normalizeCustomMediaType(categoryLabel, listNameForDisplay);
+          req.userConfig.customMediaTypeLabels[addonId] = categoryLabel.slice(0, 120);
+        }
+
         req.userConfig.lastUpdated = new Date().toISOString();
         const newConfigHash = await compressConfig(req.userConfig);
         manifestCache.clear();
@@ -1310,14 +1336,16 @@ module.exports = function(router) {
       const { listId, customMediaType } = req.body;
       if (!listId) return res.status(400).json({ error: 'List ID required for custom media type.' });
 
-      if (!req.userConfig.customMediaTypeNames) {
-        req.userConfig.customMediaTypeNames = {};
-      }
+      if (!req.userConfig.customMediaTypeNames) req.userConfig.customMediaTypeNames = {};
+      if (!req.userConfig.customMediaTypeLabels) req.userConfig.customMediaTypeLabels = {};
 
       if (customMediaType && customMediaType.trim()) {
-        req.userConfig.customMediaTypeNames[String(listId)] = customMediaType.trim().toLowerCase();
+        const label = customMediaType.trim().slice(0, 120);
+        req.userConfig.customMediaTypeNames[String(listId)] = normalizeCustomMediaType(label, listId);
+        req.userConfig.customMediaTypeLabels[String(listId)] = label;
       } else {
         delete req.userConfig.customMediaTypeNames[String(listId)];
+        delete req.userConfig.customMediaTypeLabels[String(listId)];
       }
 
       const newConfigHash = await updateConfigLightweight(req.userConfig, {}, 'custom media type update');
@@ -1514,7 +1542,8 @@ module.exports = function(router) {
         hiddenLists: [], 
         removedLists: [], 
         customListNames: {}, 
-        customMediaTypeNames: {}, 
+        customMediaTypeNames: {},
+        customMediaTypeLabels: {},
         mergedLists: {}, 
         sortPreferences: {}, 
         importedAddons: {}, 
@@ -1652,6 +1681,7 @@ module.exports = function(router) {
         importedAddons: req.userConfig.importedAddons || {},
         listsMetadata: req.userConfig.listsMetadata || {},
         customMediaTypeNames: req.userConfig.customMediaTypeNames || {},
+        customMediaTypeLabels: req.userConfig.customMediaTypeLabels || {},
         isPotentiallySharedConfig: req.isPotentiallySharedConfig || false,
         randomMDBListUsernames: req.userConfig.randomMDBListUsernames || [],
         message: 'Lightweight mode - use /lists-full for complete list data'
@@ -1708,8 +1738,9 @@ module.exports = function(router) {
       if (req.userConfig.enableRandomListFeature && req.userConfig.apiKey) {
         const manifestListId = 'random_mdblist_catalog';
         const customTypeName = req.userConfig.customMediaTypeNames?.[manifestListId];
-        let effectiveMediaTypeDisplay = customTypeName ? 
-            customTypeName.charAt(0).toUpperCase() + customTypeName.slice(1) : 'All';
+        const customTypeLabel = req.userConfig.customMediaTypeLabels?.[manifestListId];
+        let effectiveMediaTypeDisplay = customTypeLabel || (customTypeName ?
+            customTypeName.charAt(0).toUpperCase() + customTypeName.slice(1) : 'All');
 
         const randomCatalogUIEntry = {
             id: manifestListId,
@@ -1847,10 +1878,10 @@ module.exports = function(router) {
       let defaultSort = { sort: (list.source === 'trakt') ? 'rank' : 'default', order: (list.source === 'trakt') ? 'asc' : 'desc' };
       if (list.source === 'trakt' && list.isTraktWatchlist) { defaultSort = { sort: 'added', order: 'desc' }; }
                       const customTypeName = req.userConfig.customMediaTypeNames?.[manifestListId];
+                      const customTypeLabel = req.userConfig.customMediaTypeLabels?.[manifestListId];
                 let effectiveMediaTypeDisplay;
-                if (customTypeName) {
-                    // Capitalize first letter for display while keeping storage lowercase
-                    effectiveMediaTypeDisplay = customTypeName.charAt(0).toUpperCase() + customTypeName.slice(1);
+                if (customTypeLabel || customTypeName) {
+                    effectiveMediaTypeDisplay = customTypeLabel || customTypeName.charAt(0).toUpperCase() + customTypeName.slice(1);
                 } else {
                     if (determinedHasMovies && determinedHasShows) effectiveMediaTypeDisplay = 'All';
                     else if (determinedHasMovies) effectiveMediaTypeDisplay = 'Movie';
@@ -1899,10 +1930,10 @@ module.exports = function(router) {
                 const sortOriginalIdForUrl = addon.mdblistId || addonGroupId;
 
                 const customTypeName = req.userConfig.customMediaTypeNames?.[addonGroupId];
+                const customTypeLabel = req.userConfig.customMediaTypeLabels?.[addonGroupId];
                 let effectiveMediaTypeDisplay;
-                if (customTypeName) {
-                    // Capitalize first letter for display while keeping storage lowercase
-                    effectiveMediaTypeDisplay = customTypeName.charAt(0).toUpperCase() + customTypeName.slice(1);
+                if (customTypeLabel || customTypeName) {
+                    effectiveMediaTypeDisplay = customTypeLabel || customTypeName.charAt(0).toUpperCase() + customTypeName.slice(1);
                 } else {
                     if (urlImportHasMovies && urlImportHasShows) effectiveMediaTypeDisplay = 'All';
                     else if (urlImportHasMovies) effectiveMediaTypeDisplay = 'Movie';
@@ -1961,11 +1992,11 @@ module.exports = function(router) {
                 const subCatalogIsUserMerged = subCatalogCanBeMerged ? (req.userConfig.mergedLists?.[catalogIdStr] !== false) : false;
                 
                 const customTypeName = req.userConfig.customMediaTypeNames?.[catalogIdStr];
+                const customTypeLabel = req.userConfig.customMediaTypeLabels?.[catalogIdStr];
                 let effectiveMediaTypeDisplay;
 
-                if (customTypeName) {
-                    // Capitalize first letter for display while keeping storage lowercase
-                    effectiveMediaTypeDisplay = customTypeName.charAt(0).toUpperCase() + customTypeName.slice(1);
+                if (customTypeLabel || customTypeName) {
+                    effectiveMediaTypeDisplay = customTypeLabel || customTypeName.charAt(0).toUpperCase() + customTypeName.slice(1);
                 } else {
                     if (catTypeLower && !['movie', 'series', 'tv', 'all'].includes(catTypeLower)) {
                          effectiveMediaTypeDisplay = catTypeLower.charAt(0).toUpperCase() + catTypeLower.slice(1);
@@ -2065,6 +2096,8 @@ module.exports = function(router) {
         lists: processedLists,
         importedAddons: req.userConfig.importedAddons || {},
         listsMetadata: req.userConfig.listsMetadata,
+        customMediaTypeNames: req.userConfig.customMediaTypeNames || {},
+        customMediaTypeLabels: req.userConfig.customMediaTypeLabels || {},
         isPotentiallySharedConfig: req.isPotentiallySharedConfig,
         randomMDBListUsernames: (req.userConfig.randomMDBListUsernames && req.userConfig.randomMDBListUsernames.length > 0) 
                                 ? req.userConfig.randomMDBListUsernames 

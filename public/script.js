@@ -269,6 +269,7 @@ document.addEventListener('DOMContentLoaded', function() {
         listsMetadata: {},
         customListNames: {},
         customMediaTypeNames: {},
+        customMediaTypeLabels: {},
         mergedLists: {},
         sortPreferences: {},
         disableGenreFilter: false,
@@ -315,6 +316,7 @@ document.addEventListener('DOMContentLoaded', function() {
     upstashForm: document.getElementById('upstashForm'),
     closeUpstashBtn: document.getElementById('closeUpstashBtn'),
     universalImportInput: document.getElementById('universalImportInput'),
+    traktCategoryInput: document.getElementById('traktCategoryInput'),
     importedAddonsContainer: document.getElementById('importedAddons'),
     addonsList: document.getElementById('addonsList'),
     listContainer: document.getElementById('listContainer'),
@@ -843,7 +845,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     if ((value.includes('trakt.tv/users/') && value.includes('/lists/')) || value.includes('mdblist.com/lists/')) {
         MOCK_listUrlInput.value = value;
-        await handleListUrlImport(MOCK_listUrlInput);
+        await handleListUrlImport(MOCK_listUrlInput, elements.traktCategoryInput?.value || '');
+        if (elements.traktCategoryInput) elements.traktCategoryInput.value = '';
     } else if (value.endsWith('/manifest.json') || value.includes('/manifest.json?')) {
         MOCK_manifestUrlInput.value = value;
         await handleAddonImport(MOCK_manifestUrlInput);
@@ -1098,6 +1101,7 @@ document.addEventListener('DOMContentLoaded', function() {
         hiddenLists: new Set(data.config.hiddenLists || []),
         removedLists: new Set(data.config.removedLists || []),
         customMediaTypeNames: data.config.customMediaTypeNames || {},
+        customMediaTypeLabels: data.config.customMediaTypeLabels || {},
       };
       
       // Ensure hiddenLists and removedLists are Sets (double check)
@@ -1546,12 +1550,12 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
 
-  async function handleListUrlImport(mockListUrlInput) {
+  async function handleListUrlImport(mockListUrlInput, category = '') {
     const url = (mockListUrlInput || elements.listUrlInput).value.trim();
     if (!url) return showNotification('import', 'Please enter a MDBList or Trakt list URL.', 'error');
     try {
       const response = await fetch(`/${state.configHash}/import-list-url`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, category }) });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.error || data.details || `Failed to import URL`);
 
@@ -1601,6 +1605,7 @@ document.addEventListener('DOMContentLoaded', function() {
       state.userConfig.importedAddons = data.importedAddons || {};
       state.userConfig.listsMetadata = data.listsMetadata || state.userConfig.listsMetadata || {};
       state.userConfig.customMediaTypeNames = data.customMediaTypeNames || state.userConfig.customMediaTypeNames || {};
+      state.userConfig.customMediaTypeLabels = data.customMediaTypeLabels || state.userConfig.customMediaTypeLabels || {};
       state.userConfig.availableSortOptions = [...defaultConfig.availableSortOptions];
       state.userConfig.traktSortOptions = [...defaultConfig.traktSortOptions];
       state.isPotentiallySharedConfig = data.isPotentiallySharedConfig || false;
