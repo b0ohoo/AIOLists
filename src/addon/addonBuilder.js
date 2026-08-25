@@ -85,6 +85,25 @@ const getManifestCatalogName = (listId, originalName, customListNames) => {
   return originalName;
 };
 
+function getCustomCatalogType(listId, userConfig) {
+  const configuredType = userConfig.customMediaTypeNames?.[String(listId)];
+  return configuredType && !['movie', 'series', 'all'].includes(configuredType)
+    ? configuredType
+    : null;
+}
+
+// Remux preserves non-standard Stremio catalog types as custom_stremio_type.
+// Items still need movie/series semantics internally for metadata and playback.
+function resolveCatalogItemType(type, listId, userConfig) {
+  if (type === 'movie' || type === 'series') return type;
+  if (!getCustomCatalogType(listId, userConfig)) return type;
+
+  const metadata = userConfig.listsMetadata?.[String(listId)] || {};
+  const imported = userConfig.importedAddons?.[String(listId)] || {};
+  if (metadata.hasShows === true || imported.hasShows === true) return 'series';
+  return 'movie';
+}
+
 async function fetchListContent(listId, userConfig, skip = 0, genre = null, stremioCatalogType = 'all') {
   const fetchContentStartTime = Date.now();
   
@@ -1162,7 +1181,14 @@ async function createAddon(userConfig) {
     
     let metas = await convertToStremioFormat(enrichedResult, userConfig.rpdbApiKey, metadataConfig);
     const convertEndTime = Date.now();
-    
+
+    // Remux preserves non-standard Stremio catalog types as custom_stremio_type.
+    // Keep movie/series semantics for metadata, but expose the configured
+    // catalog type on the returned items so Remux can create the right category.
+    const customCatalogType = getCustomCatalogType(id, userConfig);
+    if (customCatalogType) {
+      metas = metas.map(meta => ({ ...meta, type: customCatalogType }));
+    }
 
     // Apply type filtering
     if (type === 'movie' || type === 'series') {
@@ -1220,6 +1246,12 @@ async function createAddon(userConfig) {
   });
 
   builder.defineMetaHandler(async ({ type, id }) => {
+    // Remux may request metadata using a custom catalog type. Resolve the
+    // underlying movie/series type for providers, while retaining the custom
+    // type in the response sent back to Remux.
+    const requestedType = type;
+    type = resolveCatalogItemType(type, id, userConfig);
+
     // Support both IMDB IDs (tt) and TMDB IDs (tmdb:)
     if (!id.startsWith('tt') && !id.startsWith('tmdb:')) {
       return Promise.resolve({ meta: null });
@@ -1374,6 +1406,7 @@ async function createAddon(userConfig) {
               
 
               
+              tmdbMeta.type = requestedType;
               return Promise.resolve({ 
                 meta: tmdbMeta,
                 cacheMaxAge: 24 * 60 * 60 // Cache for 24 hours
@@ -1407,7 +1440,7 @@ async function createAddon(userConfig) {
         const meta = {
           id: id,
           imdb_id: id.startsWith('tt') ? id : enrichedItem.imdb_id,
-          type: type,
+          type: requestedType,
           name: enrichedItem.name || enrichedItem.title || "Unknown Title",
           poster: enrichedItem.poster,
           background: enrichedItem.background || enrichedItem.backdrop,
@@ -1465,7 +1498,7 @@ async function createAddon(userConfig) {
       return Promise.resolve({ 
         meta: { 
           id, 
-          type, 
+          type: requestedType,
           name: "Details unavailable",
           behaviorHints: {
             hasScheduledVideos: type === 'series'
@@ -1478,7 +1511,7 @@ async function createAddon(userConfig) {
       return Promise.resolve({ 
         meta: { 
           id, 
-          type, 
+          type: requestedType,
           name: "Error loading details",
           behaviorHints: {
             hasScheduledVideos: type === 'series'
